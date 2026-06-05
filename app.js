@@ -91,6 +91,9 @@ const state = {
   spotSource: "",
   bandModel: null,
   hoverPoint: null,
+  hoverFrame: null,
+  pendingHoverEvent: null,
+  lastHoverKey: "",
   chartPoints: [],
   chartPlot: null,
   chartScales: null,
@@ -98,6 +101,7 @@ const state = {
 
 const els = {
   canvas: document.querySelector("#rainbowChart"),
+  overlay: document.querySelector("#chartOverlay"),
   tooltip: document.querySelector("#chartTooltip"),
   loader: document.querySelector("#chartLoader"),
   legend: document.querySelector("#legend"),
@@ -126,11 +130,11 @@ function wireEvents() {
   window.addEventListener("resize", drawChart);
   els.refreshButton.addEventListener("click", loadPrices);
   els.shareButton.addEventListener("click", copyShareText);
-  els.canvas.addEventListener("mousemove", handleChartHover);
-  els.canvas.addEventListener("mouseleave", clearChartHover);
-  els.canvas.addEventListener("touchstart", handleChartTouch, { passive: true });
-  els.canvas.addEventListener("touchmove", handleChartTouch, { passive: true });
-  els.canvas.addEventListener("touchend", clearChartHover);
+  els.overlay.addEventListener("mousemove", queueChartHover);
+  els.overlay.addEventListener("mouseleave", clearChartHover);
+  els.overlay.addEventListener("touchstart", handleChartTouch, { passive: true });
+  els.overlay.addEventListener("touchmove", handleChartTouch, { passive: true });
+  els.overlay.addEventListener("touchend", clearChartHover);
   document.querySelectorAll("[data-range]").forEach((button) => {
     button.addEventListener("click", () => {
       document.querySelectorAll("[data-range]").forEach((item) => item.classList.remove("active"));
@@ -347,7 +351,12 @@ function drawChart() {
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.round(rect.width * dpr);
   canvas.height = Math.round(rect.height * dpr);
+  els.overlay.width = canvas.width;
+  els.overlay.height = canvas.height;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const overlayCtx = els.overlay.getContext("2d");
+  overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  overlayCtx.clearRect(0, 0, rect.width, rect.height);
 
   const width = rect.width;
   const height = rect.height;
@@ -356,6 +365,7 @@ function drawChart() {
   if (!state.visiblePrices.length || !state.displayBands.length) {
     state.chartPoints = [];
     state.chartPlot = null;
+    state.lastHoverKey = "";
     return;
   }
 
@@ -386,9 +396,9 @@ function drawChart() {
   if (state.range === "all") drawFutureDivider(ctx, plot, xScale);
   drawPrice(ctx, state.visiblePrices, xScale, yScale);
   drawLatestMarker(ctx, state.visiblePrices[state.visiblePrices.length - 1], xScale, yScale);
-  drawHover(ctx, state.hoverPoint, plot);
   ctx.strokeStyle = "rgba(17,24,39,0.16)";
   ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
+  drawOverlay();
 }
 
 function drawGrid(ctx, plot, minY, maxY, minX, maxX, yScale, xScale) {
@@ -513,12 +523,21 @@ function renderFutureMood() {
 
 function handleChartTouch(event) {
   const touch = event.touches[0];
-  if (touch) handleChartHover(touch);
+  if (touch) queueChartHover(touch);
+}
+
+function queueChartHover(event) {
+  state.pendingHoverEvent = { clientX: event.clientX, clientY: event.clientY };
+  if (state.hoverFrame) return;
+  state.hoverFrame = window.requestAnimationFrame(() => {
+    state.hoverFrame = null;
+    handleChartHover(state.pendingHoverEvent);
+  });
 }
 
 function handleChartHover(event) {
   if (!state.chartPlot || !state.chartScales) return;
-  const rect = els.canvas.getBoundingClientRect();
+  const rect = els.overlay.getBoundingClientRect();
   const x = event.clientX - rect.left;
   const y = event.clientY - rect.top;
   const plot = state.chartPlot;
@@ -534,15 +553,19 @@ function handleChartHover(event) {
   } else {
     state.hoverPoint = nearestPoint(x);
   }
+  const hoverKey = `${state.hoverPoint.type}-${Math.round(state.hoverPoint.x)}-${Math.round(state.hoverPoint.y)}-${state.hoverPoint.zone.name}`;
+  if (hoverKey === state.lastHoverKey) return;
+  state.lastHoverKey = hoverKey;
   positionTooltip(state.hoverPoint, rect);
-  drawChart();
+  drawOverlay();
 }
 
 function clearChartHover() {
   state.hoverPoint = null;
+  state.lastHoverKey = "";
   els.tooltip.classList.remove("show");
   els.tooltip.setAttribute("aria-hidden", "true");
-  if (state.chartPlot) drawChart();
+  clearOverlay();
 }
 
 function nearestPoint(x) {
@@ -610,6 +633,23 @@ function drawHover(ctx, point, plot) {
   ctx.fill();
   ctx.stroke();
   ctx.restore();
+}
+
+function drawOverlay() {
+  const rect = els.overlay.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const ctx = els.overlay.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, rect.width, rect.height);
+  drawHover(ctx, state.hoverPoint, state.chartPlot);
+}
+
+function clearOverlay() {
+  const rect = els.overlay.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const ctx = els.overlay.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, rect.width, rect.height);
 }
 
 function drawSmoothPath(ctx, points) {

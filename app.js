@@ -1,5 +1,10 @@
 const API_URL = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=max";
 const SPOT_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd";
+const BINANCE_SPOT_URL = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT";
+const COINBASE_SPOT_URL = "https://api.coinbase.com/v2/prices/BTC-USD/spot";
+const CRYPTOCOMPARE_SPOT_URL = "https://min-api.cryptocompare.com/data/price?fsym=BTC&tsyms=USD";
+const COINCAP_SPOT_URL = "https://api.coincap.io/v2/assets/bitcoin";
+const KRAKEN_SPOT_URL = "https://api.kraken.com/0/public/Ticker?pair=XBTUSD";
 const GENESIS = new Date("2009-01-03T00:00:00Z");
 
 const zones = [
@@ -40,6 +45,9 @@ const state = {
   currentZone: null,
   latest: null,
   usedRecentEstimate: false,
+  hasLiveSpot: false,
+  hasLiveHistory: false,
+  spotSource: "",
   hoverPoint: null,
   chartPoints: [],
   chartPlot: null,
@@ -96,6 +104,7 @@ function wireEvents() {
 
 async function loadPrices() {
   setLoading(true);
+  const spotPromise = fetchCurrentSpot();
   try {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 4500);
@@ -105,11 +114,20 @@ async function loadPrices() {
     const data = await response.json();
     state.allPrices = normalizePrices(data.prices);
     if (state.allPrices.length < 100) throw new Error("not enough price data");
-    await applyCurrentSpot(state.allPrices);
+    const spotPrice = await spotPromise;
+    if (spotPrice) applySpotToPrices(state.allPrices, spotPrice.price);
     state.usedRecentEstimate = false;
+    state.hasLiveSpot = Boolean(spotPrice);
+    state.spotSource = spotPrice?.source || "";
+    state.hasLiveHistory = true;
   } catch (error) {
     state.allPrices = interpolateFallback();
+    const spotPrice = await spotPromise.catch(() => null);
+    if (spotPrice) applySpotToPrices(state.allPrices, spotPrice.price);
     state.usedRecentEstimate = true;
+    state.hasLiveSpot = Boolean(spotPrice);
+    state.spotSource = spotPrice?.source || "";
+    state.hasLiveHistory = false;
   }
 
   state.bands = buildBands(state.allPrices);
@@ -125,25 +143,76 @@ function normalizePrices(prices = []) {
     .filter((item) => item.price > 0 && item.date >= new Date("2011-01-01T00:00:00Z"));
 }
 
-async function applyCurrentSpot(prices) {
+async function fetchCurrentSpot() {
+  const results = await Promise.all([
+    fetchBinanceSpot().catch(() => null),
+    fetchCoinbaseSpot().catch(() => null),
+    fetchCoingeckoSpot().catch(() => null),
+    fetchCryptoCompareSpot().catch(() => null),
+    fetchCoinCapSpot().catch(() => null),
+    fetchKrakenSpot().catch(() => null),
+  ]);
+  return results.find((result) => Number.isFinite(result?.price)) || null;
+}
+
+async function fetchBinanceSpot() {
+  const data = await fetchJsonWithTimeout(BINANCE_SPOT_URL, 2500);
+  const price = Number(data?.price);
+  return Number.isFinite(price) ? { price, source: "Binance" } : null;
+}
+
+async function fetchCoinbaseSpot() {
+  const data = await fetchJsonWithTimeout(COINBASE_SPOT_URL, 2500);
+  const price = Number(data?.data?.amount);
+  return Number.isFinite(price) ? { price, source: "Coinbase" } : null;
+}
+
+async function fetchCoingeckoSpot() {
+  const data = await fetchJsonWithTimeout(SPOT_API_URL, 2500);
+  const price = Number(data?.bitcoin?.usd);
+  return Number.isFinite(price) ? { price, source: "CoinGecko" } : null;
+}
+
+async function fetchCryptoCompareSpot() {
+  const data = await fetchJsonWithTimeout(CRYPTOCOMPARE_SPOT_URL, 2500);
+  const price = Number(data?.USD);
+  return Number.isFinite(price) ? { price, source: "CryptoCompare" } : null;
+}
+
+async function fetchCoinCapSpot() {
+  const data = await fetchJsonWithTimeout(COINCAP_SPOT_URL, 2500);
+  const price = Number(data?.data?.priceUsd);
+  return Number.isFinite(price) ? { price, source: "CoinCap" } : null;
+}
+
+async function fetchKrakenSpot() {
+  const data = await fetchJsonWithTimeout(KRAKEN_SPOT_URL, 2500);
+  const ticker = data?.result?.XXBTZUSD || data?.result?.XBTUSD;
+  const price = Number(ticker?.c?.[0]);
+  return Number.isFinite(price) ? { price, source: "Kraken" } : null;
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs) {
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 2500);
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(SPOT_API_URL, { cache: "no-store", signal: controller.signal });
-    if (!response.ok) return;
-    const data = await response.json();
-    const spot = data?.bitcoin?.usd;
-    if (!Number.isFinite(spot) || !prices.length) return;
-    const now = new Date();
-    const latest = prices[prices.length - 1];
-    if (sameUtcDay(latest.date, now)) {
-      latest.price = spot;
-      latest.date = now;
-    } else {
-      prices.push({ date: now, price: spot });
-    }
+    const response = await fetch(url, { cache: "no-store", signal: controller.signal });
+    if (!response.ok) throw new Error("request failed");
+    return await response.json();
   } finally {
     window.clearTimeout(timeout);
+  }
+}
+
+function applySpotToPrices(prices, spot) {
+  if (!Number.isFinite(spot) || !prices.length) return;
+  const now = new Date();
+  const latest = prices[prices.length - 1];
+  if (sameUtcDay(latest.date, now)) {
+    latest.price = spot;
+    latest.date = now;
+  } else {
+    prices.push({ date: now, price: spot });
   }
 }
 
@@ -222,15 +291,31 @@ function updateSignal() {
   const latestBand = state.bands[state.bands.length - 1];
   if (!latest || !latestBand) return;
 
+  if (!state.hasLiveSpot && !state.hasLiveHistory) {
+    state.latest = null;
+    state.currentZone = null;
+    els.spotPrice.textContent = "行情暫不可用";
+    els.updatedAt.textContent = "等待更新";
+    els.zoneName.textContent = "行情暫不可用";
+    els.zoneName.style.color = "";
+    els.zoneCopy.textContent = "目前無法取得公開行情資料，請稍後再按更新行情。";
+    els.zoneRange.textContent = "--";
+    els.zoneTone.textContent = "等待資料";
+    els.needle.style.left = "50%";
+    return;
+  }
+
   const cutoffIndex = latestBand.values.findIndex((value) => latest.price < value);
   const index = cutoffIndex === -1 ? zones.length - 1 : Math.max(0, Math.min(zones.length - 1, cutoffIndex - 1));
   const zone = zones[index];
   state.latest = latest;
   state.currentZone = { ...zone, index, low: latestBand.values[index], high: latestBand.values[index + 1] };
 
-  els.spotPrice.textContent = formatUsd(latest.price);
+  els.spotPrice.textContent = state.hasLiveSpot ? formatUsd(latest.price) : "行情暫不可用";
   els.updatedAt.textContent = state.usedRecentEstimate
-    ? "最近資料"
+    ? state.hasLiveSpot
+      ? "現貨更新"
+      : "等待更新"
     : latest.date.toLocaleDateString("zh-Hant", { month: "short", day: "numeric" });
   els.zoneName.textContent = zone.name;
   els.zoneName.style.color = zone.color;

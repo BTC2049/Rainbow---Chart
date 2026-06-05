@@ -1,0 +1,533 @@
+const API_URL = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=max";
+const SPOT_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd";
+const GENESIS = new Date("2009-01-03T00:00:00Z");
+
+const zones = [
+  { name: "極度便宜", tone: "低溫區", sentiment: "極度恐慌", copy: "價格位於長期低估區，適合用長週期視角觀察分批累積機會。", color: "#3157a4" },
+  { name: "便宜累積", tone: "偏低估", sentiment: "恐慌", copy: "估值仍偏低，長線買盤通常會開始留意這個區間。", color: "#2680bd" },
+  { name: "低溫合理", tone: "偏舒適", sentiment: "謹慎", copy: "價格仍在相對舒服的位置，適合用長週期視角慢慢建立部位。", color: "#22a38a" },
+  { name: "合理區", tone: "中性", sentiment: "中性", copy: "目前不算便宜也不算過熱，適合同時觀察趨勢、資金面與個人倉位。", color: "#8fbe41" },
+  { name: "偏熱", tone: "偏樂觀", sentiment: "樂觀", copy: "市場開始升溫，追高前更需要確認自己的時間週期與風險承受度。", color: "#f0cf3d" },
+  { name: "樂觀區", tone: "高溫區", sentiment: "貪婪", copy: "市場情緒明顯升溫，適合檢查槓桿、止盈與資金配置。", color: "#ee9a2f" },
+  { name: "過熱區", tone: "偏高估", sentiment: "高度貪婪", copy: "估值已經偏高，市場情緒通常較熱，新增部位需要更謹慎。", color: "#e56135" },
+  { name: "泡沫警戒", tone: "高風險", sentiment: "極度貪婪", copy: "價格進入高風險區，應優先考慮風險控制與倉位保護。", color: "#bd3242" },
+  { name: "極度泡沫", tone: "極高風險", sentiment: "泡沫狂熱", copy: "價格非常過熱，任何新增部位都應該使用更嚴格的風險假設。", color: "#7a1f45" },
+];
+
+const fallbackPrices = [
+  ["2012-01-01", 5.3],
+  ["2013-01-01", 13.3],
+  ["2014-01-01", 770],
+  ["2015-01-01", 314],
+  ["2016-01-01", 434],
+  ["2017-01-01", 998],
+  ["2018-01-01", 13412],
+  ["2019-01-01", 3742],
+  ["2020-01-01", 7200],
+  ["2021-01-01", 29374],
+  ["2022-01-01", 47686],
+  ["2023-01-01", 16625],
+  ["2024-01-01", 44167],
+  ["2025-01-01", 93400],
+  ["2026-06-01", 105000],
+].map(([date, price]) => ({ date: new Date(`${date}T00:00:00Z`), price }));
+
+const state = {
+  allPrices: [],
+  visiblePrices: [],
+  bands: [],
+  range: "all",
+  currentZone: null,
+  latest: null,
+  usedRecentEstimate: false,
+  hoverPoint: null,
+  chartPoints: [],
+  chartPlot: null,
+};
+
+const els = {
+  canvas: document.querySelector("#rainbowChart"),
+  tooltip: document.querySelector("#chartTooltip"),
+  loader: document.querySelector("#chartLoader"),
+  legend: document.querySelector("#legend"),
+  spotPrice: document.querySelector("#spotPrice"),
+  updatedAt: document.querySelector("#updatedAt"),
+  zoneName: document.querySelector("#zoneName"),
+  zoneCopy: document.querySelector("#zoneCopy"),
+  zoneRange: document.querySelector("#zoneRange"),
+  zoneTone: document.querySelector("#zoneTone"),
+  needle: document.querySelector("#temperatureNeedle"),
+  shareButton: document.querySelector("#shareButton"),
+  refreshButton: document.querySelector("#refreshButton"),
+  leadForm: document.querySelector("#leadForm"),
+  leadEmail: document.querySelector("#leadEmail"),
+  leadIntent: document.querySelector("#leadIntent"),
+  leadMessage: document.querySelector("#leadMessage"),
+  toast: document.querySelector("#toast"),
+};
+
+init();
+
+function init() {
+  renderLegend();
+  wireEvents();
+  loadPrices();
+}
+
+function wireEvents() {
+  window.addEventListener("resize", drawChart);
+  els.refreshButton.addEventListener("click", loadPrices);
+  els.shareButton.addEventListener("click", copyShareText);
+  els.canvas.addEventListener("mousemove", handleChartHover);
+  els.canvas.addEventListener("mouseleave", clearChartHover);
+  els.canvas.addEventListener("touchstart", handleChartTouch, { passive: true });
+  els.canvas.addEventListener("touchmove", handleChartTouch, { passive: true });
+  els.canvas.addEventListener("touchend", clearChartHover);
+  document.querySelectorAll("[data-range]").forEach((button) => {
+    button.addEventListener("click", () => {
+      document.querySelectorAll("[data-range]").forEach((item) => item.classList.remove("active"));
+      button.classList.add("active");
+      state.range = button.dataset.range;
+      updateVisiblePrices();
+      drawChart();
+    });
+  });
+}
+
+async function loadPrices() {
+  setLoading(true);
+  try {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 4500);
+    const response = await fetch(API_URL, { cache: "no-store", signal: controller.signal });
+    window.clearTimeout(timeout);
+    if (!response.ok) throw new Error("price unavailable");
+    const data = await response.json();
+    state.allPrices = normalizePrices(data.prices);
+    if (state.allPrices.length < 100) throw new Error("not enough price data");
+    await applyCurrentSpot(state.allPrices);
+    state.usedRecentEstimate = false;
+  } catch (error) {
+    state.allPrices = interpolateFallback();
+    state.usedRecentEstimate = true;
+  }
+
+  state.bands = buildBands(state.allPrices);
+  updateVisiblePrices();
+  updateSignal();
+  drawChart();
+  setLoading(false);
+}
+
+function normalizePrices(prices = []) {
+  return prices
+    .map(([timestamp, price]) => ({ date: new Date(timestamp), price }))
+    .filter((item) => item.price > 0 && item.date >= new Date("2011-01-01T00:00:00Z"));
+}
+
+async function applyCurrentSpot(prices) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 2500);
+  try {
+    const response = await fetch(SPOT_API_URL, { cache: "no-store", signal: controller.signal });
+    if (!response.ok) return;
+    const data = await response.json();
+    const spot = data?.bitcoin?.usd;
+    if (!Number.isFinite(spot) || !prices.length) return;
+    const now = new Date();
+    const latest = prices[prices.length - 1];
+    if (sameUtcDay(latest.date, now)) {
+      latest.price = spot;
+      latest.date = now;
+    } else {
+      prices.push({ date: now, price: spot });
+    }
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+function sameUtcDay(first, second) {
+  return (
+    first.getUTCFullYear() === second.getUTCFullYear() &&
+    first.getUTCMonth() === second.getUTCMonth() &&
+    first.getUTCDate() === second.getUTCDate()
+  );
+}
+
+function interpolateFallback() {
+  const points = [];
+  for (let i = 0; i < fallbackPrices.length - 1; i += 1) {
+    const start = fallbackPrices[i];
+    const end = fallbackPrices[i + 1];
+    const steps = Math.max(1, Math.round((end.date - start.date) / 86400000 / 30));
+    for (let step = 0; step < steps; step += 1) {
+      const ratio = step / steps;
+      const date = new Date(start.date.getTime() + (end.date - start.date) * ratio);
+      const logPrice = Math.log(start.price) + (Math.log(end.price) - Math.log(start.price)) * ratio;
+      points.push({ date, price: Math.exp(logPrice) });
+    }
+  }
+  points.push(fallbackPrices[fallbackPrices.length - 1]);
+  return points;
+}
+
+function buildBands(prices) {
+  const samples = prices.map((item) => ({
+    x: Math.log(daysSinceGenesis(item.date)),
+    y: Math.log10(item.price),
+  }));
+  const avgX = average(samples.map((item) => item.x));
+  const avgY = average(samples.map((item) => item.y));
+  const slope =
+    samples.reduce((sum, item) => sum + (item.x - avgX) * (item.y - avgY), 0) /
+    samples.reduce((sum, item) => sum + (item.x - avgX) ** 2, 0);
+  const intercept = avgY - slope * avgX;
+  const multipliers = [0.26, 0.42, 0.64, 0.95, 1.38, 2.02, 2.96, 4.34, 6.36, 9.32];
+
+  return prices.map((item) => {
+    const center = 10 ** (intercept + slope * Math.log(daysSinceGenesis(item.date)));
+    return {
+      date: item.date,
+      values: multipliers.map((multiple) => center * multiple),
+    };
+  });
+}
+
+function updateVisiblePrices() {
+  if (state.range === "all") {
+    state.visiblePrices = state.allPrices;
+    return;
+  }
+  const latestDate = state.allPrices[state.allPrices.length - 1]?.date || new Date();
+  const cutoff = rangeCutoff(latestDate, state.range);
+  state.visiblePrices = state.allPrices.filter((item) => item.date >= cutoff);
+  if (state.visiblePrices.length < 2) {
+    state.visiblePrices = state.allPrices.slice(-2);
+  }
+}
+
+function rangeCutoff(latestDate, range) {
+  const cutoff = new Date(latestDate);
+  const amount = Number(range.slice(0, -1));
+  const unit = range.slice(-1);
+  if (unit === "d") cutoff.setDate(cutoff.getDate() - amount);
+  if (unit === "m") cutoff.setMonth(cutoff.getMonth() - amount);
+  if (unit === "y") cutoff.setFullYear(cutoff.getFullYear() - amount);
+  return cutoff;
+}
+
+function updateSignal() {
+  const latest = state.allPrices[state.allPrices.length - 1];
+  const latestBand = state.bands[state.bands.length - 1];
+  if (!latest || !latestBand) return;
+
+  const cutoffIndex = latestBand.values.findIndex((value) => latest.price < value);
+  const index = cutoffIndex === -1 ? zones.length - 1 : Math.max(0, Math.min(zones.length - 1, cutoffIndex - 1));
+  const zone = zones[index];
+  state.latest = latest;
+  state.currentZone = { ...zone, index, low: latestBand.values[index], high: latestBand.values[index + 1] };
+
+  els.spotPrice.textContent = formatUsd(latest.price);
+  els.updatedAt.textContent = state.usedRecentEstimate
+    ? "最近資料"
+    : latest.date.toLocaleDateString("zh-Hant", { month: "short", day: "numeric" });
+  els.zoneName.textContent = zone.name;
+  els.zoneName.style.color = zone.color;
+  els.zoneCopy.textContent = zone.copy;
+  els.zoneRange.textContent = state.currentZone.high
+    ? `${formatUsd(state.currentZone.low)} - ${formatUsd(state.currentZone.high)}`
+    : `高於 ${formatUsd(state.currentZone.low)}`;
+  els.zoneTone.textContent = zone.tone;
+  els.needle.style.left = `${(index / (zones.length - 1)) * 100}%`;
+}
+
+function drawChart() {
+  const canvas = els.canvas;
+  const ctx = canvas.getContext("2d");
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(rect.width * dpr);
+  canvas.height = Math.round(rect.height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const width = rect.width;
+  const height = rect.height;
+  ctx.clearRect(0, 0, width, height);
+
+  const prices = state.visiblePrices;
+  if (!prices.length || !state.bands.length) return;
+
+  const bandMap = new Map(state.bands.map((item) => [item.date.getTime(), item.values]));
+  const bands = prices.map((item) => ({ date: item.date, values: bandMap.get(item.date.getTime()) })).filter((item) => item.values);
+  const padding = { top: 26, right: 72, bottom: 48, left: 76 };
+  const plot = {
+    x: padding.left,
+    y: padding.top,
+    w: width - padding.left - padding.right,
+    h: height - padding.top - padding.bottom,
+  };
+  const yValues = prices.flatMap((item, idx) => [item.price, ...(bands[idx]?.values || [])]);
+  const minY = Math.log10(Math.max(0.1, Math.min(...yValues) * 0.72));
+  const maxY = Math.log10(Math.max(...yValues) * 1.16);
+  const minX = prices[0].date.getTime();
+  const maxX = prices[prices.length - 1].date.getTime();
+
+  const xScale = (date) => plot.x + ((date.getTime() - minX) / (maxX - minX || 1)) * plot.w;
+  const yScale = (price) => plot.y + (1 - (Math.log10(price) - minY) / (maxY - minY || 1)) * plot.h;
+  state.chartPlot = plot;
+  state.chartPoints = prices.map((item) => {
+    const values = bandMap.get(item.date.getTime()) || [];
+    return {
+      item,
+      x: xScale(item.date),
+      y: yScale(item.price),
+      zone: zoneForPrice(item.price, values),
+    };
+  });
+
+  drawGrid(ctx, plot, minY, maxY, minX, maxX, yScale, xScale);
+  drawBands(ctx, bands, xScale, yScale);
+  drawPrice(ctx, prices, xScale, yScale);
+  drawLatestMarker(ctx, prices[prices.length - 1], xScale, yScale);
+  drawHover(ctx, state.hoverPoint, plot);
+  ctx.strokeStyle = "rgba(17,24,39,0.16)";
+  ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
+}
+
+function drawGrid(ctx, plot, minY, maxY, minX, maxX, yScale, xScale) {
+  ctx.save();
+  ctx.strokeStyle = "rgba(98,112,134,0.18)";
+  ctx.fillStyle = "#627086";
+  ctx.font = "12px Microsoft JhengHei, sans-serif";
+
+  const ticks = [1, 10, 100, 1000, 10000, 100000, 1000000];
+  ticks.forEach((tick) => {
+    const logTick = Math.log10(tick);
+    if (logTick < minY || logTick > maxY) return;
+    const y = yScale(tick);
+    ctx.beginPath();
+    ctx.moveTo(plot.x, y);
+    ctx.lineTo(plot.x + plot.w, y);
+    ctx.stroke();
+    ctx.fillText(formatUsd(tick), plot.x + plot.w + 10, y + 4);
+  });
+
+  const startYear = new Date(minX).getFullYear();
+  const endYear = new Date(maxX).getFullYear();
+  const step = endYear - startYear > 8 ? 2 : 1;
+  for (let year = startYear; year <= endYear; year += step) {
+    const date = new Date(`${year}-01-01T00:00:00Z`);
+    const x = xScale(date);
+    ctx.beginPath();
+    ctx.moveTo(x, plot.y);
+    ctx.lineTo(x, plot.y + plot.h);
+    ctx.stroke();
+    ctx.fillText(String(year), x - 14, plot.y + plot.h + 28);
+  }
+  ctx.restore();
+}
+
+function drawBands(ctx, bands, xScale, yScale) {
+  for (let index = 0; index < zones.length; index += 1) {
+    ctx.beginPath();
+    bands.forEach((band, pointIndex) => {
+      const x = xScale(band.date);
+      const y = yScale(band.values[index + 1]);
+      pointIndex ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    [...bands].reverse().forEach((band) => {
+      ctx.lineTo(xScale(band.date), yScale(band.values[index]));
+    });
+    ctx.closePath();
+    ctx.fillStyle = zones[index].color;
+    ctx.globalAlpha = 0.82;
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawPrice(ctx, prices, xScale, yScale) {
+  ctx.save();
+  drawSmoothPath(
+    ctx,
+    prices.map((item) => ({ x: xScale(item.date), y: yScale(item.price) }))
+  );
+  ctx.lineWidth = 2.4;
+  ctx.strokeStyle = "#101827";
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawLatestMarker(ctx, latest, xScale, yScale) {
+  const x = xScale(latest.date);
+  const y = yScale(latest.price);
+  ctx.save();
+  ctx.fillStyle = "#ffffff";
+  ctx.strokeStyle = "#101827";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(x, y, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = "#101827";
+  ctx.font = "800 13px Microsoft JhengHei, sans-serif";
+  ctx.fillText(formatUsd(latest.price), Math.max(84, x - 84), y - 14);
+  ctx.restore();
+}
+
+function renderLegend() {
+  els.legend.innerHTML = zones
+    .map((zone) => `<span><i style="background:${zone.color}"></i>${zone.name}</span>`)
+    .join("");
+}
+
+function handleChartTouch(event) {
+  const touch = event.touches[0];
+  if (!touch) return;
+  handleChartHover(touch);
+}
+
+function handleChartHover(event) {
+  if (!state.chartPoints.length || !state.chartPlot) return;
+  const rect = els.canvas.getBoundingClientRect();
+  const clientX = event.clientX;
+  const clientY = event.clientY;
+  const x = clientX - rect.left;
+  const y = clientY - rect.top;
+  const plot = state.chartPlot;
+
+  if (x < plot.x || x > plot.x + plot.w || y < plot.y || y > plot.y + plot.h) {
+    clearChartHover();
+    return;
+  }
+
+  const nearest = nearestPoint(x);
+  state.hoverPoint = nearest;
+  positionTooltip(nearest, rect);
+  drawChart();
+}
+
+function clearChartHover() {
+  state.hoverPoint = null;
+  els.tooltip.classList.remove("show");
+  els.tooltip.setAttribute("aria-hidden", "true");
+  drawChart();
+}
+
+function nearestPoint(x) {
+  let nearest = state.chartPoints[0];
+  let nearestDistance = Math.abs(x - nearest.x);
+  for (const point of state.chartPoints) {
+    const distance = Math.abs(x - point.x);
+    if (distance < nearestDistance) {
+      nearest = point;
+      nearestDistance = distance;
+    }
+  }
+  return nearest;
+}
+
+function positionTooltip(point, rect) {
+  const shellRect = els.canvas.parentElement.getBoundingClientRect();
+  const left = Math.min(Math.max(point.x, 100), rect.width - 100);
+  const top = Math.max(point.y, 94);
+  els.tooltip.style.left = `${left + rect.left - shellRect.left}px`;
+  els.tooltip.style.top = `${top + rect.top - shellRect.top}px`;
+  els.tooltip.style.setProperty("--tooltip-color", point.zone.color);
+  els.tooltip.innerHTML = `
+    <strong>${formatUsd(point.item.price)}</strong>
+    <span>${point.item.date.toLocaleDateString("zh-Hant", { year: "numeric", month: "short", day: "numeric" })}</span>
+    <span>區間：${point.zone.name}</span>
+    <small>情緒：${point.zone.sentiment}</small>
+  `;
+  els.tooltip.classList.add("show");
+  els.tooltip.setAttribute("aria-hidden", "false");
+}
+
+function drawHover(ctx, point, plot) {
+  if (!point) return;
+  ctx.save();
+  ctx.strokeStyle = "rgba(17,24,39,0.32)";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 5]);
+  ctx.beginPath();
+  ctx.moveTo(point.x, plot.y);
+  ctx.lineTo(point.x, plot.y + plot.h);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = "#ffffff";
+  ctx.strokeStyle = point.zone.color;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(point.x, point.y, 6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawSmoothPath(ctx, points) {
+  if (!points.length) return;
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  if (points.length === 1) return;
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const current = points[index];
+    const next = points[index + 1];
+    const midX = (current.x + next.x) / 2;
+    const midY = (current.y + next.y) / 2;
+    ctx.quadraticCurveTo(current.x, current.y, midX, midY);
+  }
+  const last = points[points.length - 1];
+  ctx.lineTo(last.x, last.y);
+}
+
+function zoneForPrice(price, values = []) {
+  const cutoffIndex = values.findIndex((value) => price < value);
+  const index = cutoffIndex === -1 ? zones.length - 1 : Math.max(0, Math.min(zones.length - 1, cutoffIndex - 1));
+  return zones[index];
+}
+
+async function copyShareText() {
+  const zone = state.currentZone;
+  const latest = state.latest;
+  if (!zone || !latest) return showToast("行情還在載入中。");
+  const text = `BTC 彩虹圖今日溫度：${zone.name}\n現貨：約 ${formatUsd(latest.price)}\n參考區間：${formatUsd(zone.low)} - ${zone.high ? formatUsd(zone.high) : "更高區間"}\n情緒：${zone.sentiment}\n\n${zone.copy}`;
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast("今日訊號已複製。");
+  } catch (error) {
+    showToast("瀏覽器不支援自動複製，請手動複製頁面內容。");
+  }
+}
+
+function daysSinceGenesis(date) {
+  return Math.max(1, (date - GENESIS) / 86400000);
+}
+
+function average(values) {
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function formatUsd(value) {
+  if (!Number.isFinite(value)) return "--";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: value >= 100 ? 0 : 2,
+  }).format(value);
+}
+
+function setLoading(isLoading) {
+  els.loader.classList.toggle("hidden", !isLoading);
+  els.refreshButton.disabled = isLoading;
+}
+
+function showToast(message) {
+  els.toast.textContent = message;
+  els.toast.classList.add("show");
+  window.clearTimeout(showToast.timer);
+  showToast.timer = window.setTimeout(() => els.toast.classList.remove("show"), 3000);
+}

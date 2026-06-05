@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="BTC 彩虹溫度圖，用顏色區間快速查看比特幣長期估值位置。"
+    />
+    <title>BTC 彩虹溫度圖 | 比特幣估值工具</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#chart" aria-label="BTC 彩虹溫度圖首頁">
+        <span class="brand-mark">₿</span>
+        <span>
+          <strong>BTC 彩虹溫度圖</strong>
+          <small>比特幣長期估值參考</small>
+        </span>
+      </a>
+      <nav aria-label="主要導覽">
+        <a href="#chart">彩虹圖</a>
+        <a href="#signal">今日訊號</a>
+        <a href="#watchlist">價格提醒</a>
+      </nav>
+      <a class="button primary compact" href="#watchlist">取得提醒</a>
+    </header>
+
+    <main>
+      <section id="chart" class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Bitcoin Valuation Heatmap</p>
+          <h1>今天的 BTC，是冷、溫，還是過熱？</h1>
+          <p class="subheadline">
+            用彩虹估值區間快速查看比特幣目前的位置，判斷現在更接近累積區、合理區，還是情緒過熱區。
+          </p>
+          <div class="hero-actions">
+            <button id="shareButton" class="button primary" type="button">複製今日訊號</button>
+            <button id="refreshButton" class="button secondary" type="button">更新行情</button>
+          </div>
+          <div class="trust-row">
+            <span><strong id="spotPrice">讀取中</strong> BTC 現貨</span>
+            <span><strong id="updatedAt">等待行情</strong> 更新</span>
+            <span><strong>長週期</strong> 估值參考</span>
+          </div>
+        </div>
+
+        <aside class="signal-panel" id="signal">
+          <div class="panel-header">
+            <span>今日溫度</span>
+            <strong id="zoneName">讀取中</strong>
+          </div>
+          <div class="temperature-gauge" aria-label="BTC 估值溫度">
+            <div id="temperatureNeedle" class="temperature-needle"></div>
+          </div>
+          <p id="zoneCopy" class="zone-copy">正在整理最新價格與長期估值區間。</p>
+          <div class="signal-stats">
+            <span><small>參考區間</small><strong id="zoneRange">--</strong></span>
+            <span><small>市場狀態</small><strong id="zoneTone">觀察</strong></span>
+          </div>
+        </aside>
+      </section>
+
+      <section class="chart-section">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Rainbow Chart</p>
+            <h2>BTC 長期彩虹估值帶</h2>
+          </div>
+          <div class="range-tabs" role="group" aria-label="時間範圍">
+            <button type="button" data-range="7d">1週</button>
+            <button type="button" data-range="1m">1月</button>
+            <button type="button" data-range="3m">3月</button>
+            <button type="button" data-range="1y">1年</button>
+            <button type="button" data-range="2y">2年</button>
+            <button type="button" data-range="5y">5年</button>
+            <button type="button" data-range="10y">10年</button>
+            <button class="active" type="button" data-range="all">全部</button>
+          </div>
+        </div>
+
+        <div class="chart-shell">
+          <canvas id="rainbowChart" width="1280" height="680" aria-label="BTC 彩虹估值圖"></canvas>
+          <div id="chartTooltip" class="chart-tooltip" aria-hidden="true"></div>
+          <div id="chartLoader" class="chart-loader">正在載入 BTC 歷史價格...</div>
+        </div>
+        <div id="legend" class="legend"></div>
+        <p class="data-note">價格資料為公開行情來源的歷史資料與最近價格參考，適合觀察長週期估值位置，不適合作為逐秒交易報價。</p>
+      </section>
+
+      <section id="watchlist" class="watch-section">
+        <div class="watch-copy">
+          <p class="eyebrow">Price Alert</p>
+          <h2>價格進入關鍵區間時通知你</h2>
+          <p>
+            留下 Email，當 BTC 進入便宜區、過熱區，或出現重要區間變化時收到提醒。
+          </p>
+        </div>
+        <form id="leadForm" class="lead-form" action="https://formsubmit.co/willia098888@gmail.com" method="POST">
+          <input type="hidden" name="_subject" value="BTC 彩虹溫度圖提醒名單" />
+          <input type="hidden" name="_captcha" value="false" />
+          <input type="hidden" name="_template" value="table" />
+          <label>
+            Email
+            <input id="leadEmail" name="email" type="email" placeholder="name@email.com" required />
+          </label>
+          <label>
+            想收到的提醒
+            <select id="leadIntent" name="alert_type">
+              <option>進入便宜區提醒</option>
+              <option>進入過熱區提醒</option>
+              <option>每週 BTC 彩虹圖摘要</option>
+              <option>重大區間變化提醒</option>
+            </select>
+          </label>
+          <button class="button primary wide" type="submit">加入提醒名單</button>
+          <p id="leadMessage" class="helper-text">送出後，重要價格區間變化會寄到你的 Email。</p>
+        </form>
+      </section>
+
+      <section class="risk-section">
+        <strong>風險提醒</strong>
+        <p>
+          彩虹圖是長期估值參考，不是短線進出訊號，也不保證價格會回到某個區間。加密貨幣波動很大，請自行控管風險。
+        </p>
+      </section>
+    </main>
+
+    <footer>
+      <strong>BTC 彩虹溫度圖</strong>
+      <span>比特幣長期估值參考</span>
+    </footer>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>

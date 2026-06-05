@@ -19,24 +19,6 @@ const zones = [
   { name: "極度泡沫", tone: "極高風險", sentiment: "泡沫狂熱", copy: "價格非常過熱，任何新增部位都應該使用更嚴格的風險假設。", color: "#7a1f45" },
 ];
 
-const fallbackPrices = [
-  ["2012-01-01", 5.3],
-  ["2013-01-01", 13.3],
-  ["2014-01-01", 770],
-  ["2015-01-01", 314],
-  ["2016-01-01", 434],
-  ["2017-01-01", 998],
-  ["2018-01-01", 13412],
-  ["2019-01-01", 3742],
-  ["2020-01-01", 7200],
-  ["2021-01-01", 29374],
-  ["2022-01-01", 47686],
-  ["2023-01-01", 16625],
-  ["2024-01-01", 44167],
-  ["2025-01-01", 93400],
-  ["2026-06-01", 105000],
-].map(([date, price]) => ({ date: new Date(`${date}T00:00:00Z`), price }));
-
 const state = {
   allPrices: [],
   visiblePrices: [],
@@ -106,13 +88,7 @@ async function loadPrices() {
   setLoading(true);
   const spotPromise = fetchCurrentSpot();
   try {
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 4500);
-    const response = await fetch(API_URL, { cache: "no-store", signal: controller.signal });
-    window.clearTimeout(timeout);
-    if (!response.ok) throw new Error("price unavailable");
-    const data = await response.json();
-    state.allPrices = normalizePrices(data.prices);
+    state.allPrices = await fetchHistoricalPrices();
     if (state.allPrices.length < 100) throw new Error("not enough price data");
     const spotPrice = await spotPromise;
     if (spotPrice) applySpotToPrices(state.allPrices, spotPrice.price);
@@ -120,14 +96,16 @@ async function loadPrices() {
     state.hasLiveSpot = Boolean(spotPrice);
     state.spotSource = spotPrice?.source || "";
     state.hasLiveHistory = true;
+    hideChartMessage();
   } catch (error) {
-    state.allPrices = interpolateFallback();
+    state.allPrices = [];
     const spotPrice = await spotPromise.catch(() => null);
     if (spotPrice) applySpotToPrices(state.allPrices, spotPrice.price);
     state.usedRecentEstimate = true;
     state.hasLiveSpot = Boolean(spotPrice);
     state.spotSource = spotPrice?.source || "";
     state.hasLiveHistory = false;
+    showChartMessage("目前無法取得真實歷史價格，請稍後再更新。");
   }
 
   state.bands = buildBands(state.allPrices);
@@ -141,6 +119,90 @@ function normalizePrices(prices = []) {
   return prices
     .map(([timestamp, price]) => ({ date: new Date(timestamp), price }))
     .filter((item) => item.price > 0 && item.date >= new Date("2011-01-01T00:00:00Z"));
+}
+
+async function fetchHistoricalPrices() {
+  const sources = [fetchCoingeckoHistory, fetchCryptoCompareHistory, fetchCoinCapHistory, fetchBinanceHistory];
+  return Promise.any(
+    sources.map((source) =>
+      withTimeout(source(), 8000).then((prices) => {
+        const clean = dedupePrices(prices || []);
+        if (clean.length < 100) throw new Error("not enough history");
+        return clean;
+      })
+    )
+  ).catch(() => {
+    throw new Error("history unavailable");
+  });
+}
+
+function withTimeout(promise, timeoutMs) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      window.setTimeout(() => reject(new Error("timeout")), timeoutMs);
+    }),
+  ]);
+}
+
+async function fetchCoingeckoHistory() {
+  const data = await fetchJsonWithTimeout(API_URL, 7000);
+  return normalizePrices(data?.prices);
+}
+
+async function fetchCryptoCompareHistory() {
+  const data = await fetchJsonWithTimeout(
+    "https://min-api.cryptocompare.com/data/v2/histoday?fsym=BTC&tsym=USD&allData=true",
+    7000
+  );
+  return (data?.Data?.Data || [])
+    .map((item) => ({ date: new Date(item.time * 1000), price: Number(item.close) }))
+    .filter((item) => item.price > 0 && item.date >= new Date("2011-01-01T00:00:00Z"));
+}
+
+async function fetchCoinCapHistory() {
+  const start = new Date("2013-04-28T00:00:00Z").getTime();
+  const end = Date.now();
+  const data = await fetchJsonWithTimeout(
+    `https://api.coincap.io/v2/assets/bitcoin/history?interval=d1&start=${start}&end=${end}`,
+    7000
+  );
+  return (data?.data || [])
+    .map((item) => ({ date: new Date(item.time), price: Number(item.priceUsd) }))
+    .filter((item) => item.price > 0);
+}
+
+async function fetchBinanceHistory() {
+  const day = 86400000;
+  const end = Date.now();
+  let start = new Date("2017-08-17T00:00:00Z").getTime();
+  const prices = [];
+  while (start < end && prices.length < 4200) {
+    const chunkEnd = Math.min(end, start + day * 999);
+    const url = `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&startTime=${start}&endTime=${chunkEnd}&limit=1000`;
+    const data = await fetchJsonWithTimeout(url, 7000);
+    if (!Array.isArray(data) || !data.length) break;
+    prices.push(
+      ...data.map((item) => ({
+        date: new Date(item[0]),
+        price: Number(item[4]),
+      }))
+    );
+    start = data[data.length - 1][0] + day;
+  }
+  return prices.filter((item) => item.price > 0);
+}
+
+function dedupePrices(prices) {
+  const byDay = new Map();
+  prices
+    .filter((item) => Number.isFinite(item.price) && item.price > 0 && item.date instanceof Date)
+    .sort((a, b) => a.date - b.date)
+    .forEach((item) => {
+      const key = item.date.toISOString().slice(0, 10);
+      byDay.set(key, item);
+    });
+  return [...byDay.values()];
 }
 
 async function fetchCurrentSpot() {
@@ -224,24 +286,8 @@ function sameUtcDay(first, second) {
   );
 }
 
-function interpolateFallback() {
-  const points = [];
-  for (let i = 0; i < fallbackPrices.length - 1; i += 1) {
-    const start = fallbackPrices[i];
-    const end = fallbackPrices[i + 1];
-    const steps = Math.max(1, Math.round((end.date - start.date) / 86400000 / 30));
-    for (let step = 0; step < steps; step += 1) {
-      const ratio = step / steps;
-      const date = new Date(start.date.getTime() + (end.date - start.date) * ratio);
-      const logPrice = Math.log(start.price) + (Math.log(end.price) - Math.log(start.price)) * ratio;
-      points.push({ date, price: Math.exp(logPrice) });
-    }
-  }
-  points.push(fallbackPrices[fallbackPrices.length - 1]);
-  return points;
-}
-
 function buildBands(prices) {
+  if (!prices.length) return [];
   const samples = prices.map((item) => ({
     x: Math.log(daysSinceGenesis(item.date)),
     y: Math.log10(item.price),
@@ -264,6 +310,10 @@ function buildBands(prices) {
 }
 
 function updateVisiblePrices() {
+  if (!state.allPrices.length) {
+    state.visiblePrices = [];
+    return;
+  }
   if (state.range === "all") {
     state.visiblePrices = state.allPrices;
     return;
@@ -289,7 +339,19 @@ function rangeCutoff(latestDate, range) {
 function updateSignal() {
   const latest = state.allPrices[state.allPrices.length - 1];
   const latestBand = state.bands[state.bands.length - 1];
-  if (!latest || !latestBand) return;
+  if (!latest || !latestBand) {
+    state.latest = null;
+    state.currentZone = null;
+    els.spotPrice.textContent = "行情暫不可用";
+    els.updatedAt.textContent = "等待更新";
+    els.zoneName.textContent = "行情暫不可用";
+    els.zoneName.style.color = "";
+    els.zoneCopy.textContent = "目前無法取得真實行情資料，請稍後再按更新行情。";
+    els.zoneRange.textContent = "--";
+    els.zoneTone.textContent = "等待資料";
+    els.needle.style.left = "50%";
+    return;
+  }
 
   if (!state.hasLiveSpot && !state.hasLiveHistory) {
     state.latest = null;
@@ -341,7 +403,11 @@ function drawChart() {
   ctx.clearRect(0, 0, width, height);
 
   const prices = state.visiblePrices;
-  if (!prices.length || !state.bands.length) return;
+  if (!prices.length || !state.bands.length) {
+    state.chartPoints = [];
+    state.chartPlot = null;
+    return;
+  }
 
   const bandMap = new Map(state.bands.map((item) => [item.date.getTime(), item.values]));
   const bands = prices.map((item) => ({ date: item.date, values: bandMap.get(item.date.getTime()) })).filter((item) => item.values);
@@ -606,8 +672,22 @@ function formatUsd(value) {
 }
 
 function setLoading(isLoading) {
-  els.loader.classList.toggle("hidden", !isLoading);
+  if (isLoading) {
+    els.loader.textContent = "正在載入 BTC 真實歷史價格...";
+    els.loader.classList.remove("hidden");
+  } else if (state.allPrices.length) {
+    els.loader.classList.add("hidden");
+  }
   els.refreshButton.disabled = isLoading;
+}
+
+function showChartMessage(message) {
+  els.loader.textContent = message;
+  els.loader.classList.remove("hidden");
+}
+
+function hideChartMessage() {
+  els.loader.classList.add("hidden");
 }
 
 function showToast(message) {
